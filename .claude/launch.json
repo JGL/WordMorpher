@@ -4,7 +4,7 @@
     {
       "name": "wordmorpher",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-u", "-m", "http.server", "8765", "--bind", "127.0.0.1"],
+      "runtimeArgs": ["-u", "-m", "http.server", "8765", "--bind", "127.0.0.1", "--directory", "docs"],
       "port": 8765
     }
   ]
