@@ -6,7 +6,9 @@
 //   "ha" + "mmer"
 // So the work here happens in three stages:
 //   1. alignPhonesToLetters() - work out which letters spell each phoneme
-//   2. syllabify()            - use that to cut the written word into syllables
+//   2. analyse()              - use that to cut the written word into
+//                               syllables, and each syllable into its
+//                               start, vowel and end: "spr" + "u" + "ng"
 //   3. morphSteps()           - swap syllables from the outside in
 //
 // This file has no dependency on p5.js: sketch.js does all the drawing.
@@ -148,45 +150,79 @@ const WordMorpher = (() => {
     return String(word).replace(/[^\p{L}]/gu, "");
   }
 
-  // Cut a written word into syllables, e.g. "Helena" -> ["He", "le", "na"].
+  // Ask RiTa for the sounds of a word, grouped into syllables:
+  // "hammer" -> "hh-ae/m-er" -> [["hh", "ae"], ["m", "er"]]
   // `rita` is the RiTa object (passed in so this also works in Node).
-  function syllabify(word, rita) {
-    word = clean(word);
-    if (word === "") return [];
-    const lower = word.toLowerCase();
-
-    // "hh-ae/m-er" -> [["hh", "ae"], ["m", "er"]]
-    let phoneSyllables = [];
+  function phoneSyllablesOf(word, rita) {
     try {
-      phoneSyllables = rita
-        .syllables(lower)
+      return rita
+        .syllables(word.toLowerCase())
         .split(/[\/\s]+/)
         .filter((s) => s.length > 0)
         .map((s) => s.split("-"));
     } catch (e) {
-      // fall through: treat the word as a single syllable
+      return []; // RiTa couldn't make sense of it
     }
-    if (phoneSyllables.length < 2) return [word];
+  }
 
-    const phones = phoneSyllables.flat();
-    const spans = alignPhonesToLetters(lower, phones);
+  // Cut a written word into syllables, and each syllable into three
+  // pieces: the consonants at its start, its vowel, and the consonants
+  // at its end.
+  //   "Helena" -> He (H|e|), le (l|e|), na (n|a|)
+  //   "sprung" -> sprung (spr|u|ng)
+  // Returns a list of { text, pieces: [start, vowel, end] }, one for each
+  // syllable. There are always three pieces, but a piece can be empty.
+  function analyse(word, rita) {
+    word = clean(word);
+    if (word === "") return [];
 
-    // A syllable starts where its first phoneme starts.
-    const starts = [];
-    let p = 0;
-    for (const syllable of phoneSyllables) {
-      starts.push(spans[p][0]);
-      p += syllable.length;
-    }
-    starts[0] = 0;
+    const phoneSyllables = phoneSyllablesOf(word, rita);
+    const spans = alignPhonesToLetters(
+      word.toLowerCase(),
+      phoneSyllables.flat()
+    );
 
     const syllables = [];
-    for (let i = 0; i < starts.length; i++) {
-      const end = i + 1 < starts.length ? starts[i + 1] : word.length;
-      // (slices of the original word, so capital letters are kept)
-      if (end > starts[i]) syllables.push(word.slice(starts[i], end));
+    let p = 0; // the position of this syllable's first phoneme
+    for (const phones of phoneSyllables) {
+      const mine = spans.slice(p, p + phones.length);
+      p += phones.length;
+
+      // The syllable runs from the first letter of its first phoneme
+      // to the last letter of its last. (These are positions in the
+      // word as typed, so capital letters are kept.)
+      const from = mine[0][0];
+      const to = mine[mine.length - 1][1];
+      if (to === from) continue; // no letters of its own
+
+      // ...and its vowel from the first vowel sound to the last.
+      // (No vowel at all, like "hmm"? Then call the whole thing the vowel.)
+      const isVowel = phones.map((phone) => VOWEL_PHONES.has(phone));
+      const first = isVowel.indexOf(true);
+      const last = isVowel.lastIndexOf(true);
+      const vowelFrom = first === -1 ? from : mine[first][0];
+      const vowelTo = first === -1 ? to : mine[last][1];
+
+      syllables.push({
+        text: word.slice(from, to),
+        pieces: [
+          word.slice(from, vowelFrom),
+          word.slice(vowelFrom, vowelTo),
+          word.slice(vowelTo, to),
+        ],
+      });
+    }
+
+    // If RiTa couldn't help, treat the word as a single lump.
+    if (syllables.length === 0) {
+      return [{ text: word, pieces: ["", word, ""] }];
     }
     return syllables;
+  }
+
+  // Just the syllables, e.g. "Helena" -> ["He", "le", "na"].
+  function syllabify(word, rita) {
+    return analyse(word, rita).map((syllable) => syllable.text);
   }
 
   // When a syllable is lifted out of its word, a doubled consonant at its
@@ -204,8 +240,10 @@ const WordMorpher = (() => {
 
   // The sequence of words that morphs `source` into `target`.
   //
-  // Each step is { word, parts }, where parts is the list of syllables
-  // making up the word: { text, from: "source" | "target", index }.
+  // Each step is { word, parts }, where parts is the list of bits of text
+  // making up the word: { text, from: "source" | "target", id }. A part
+  // with the same id and text in two steps is the same bit of text, which
+  // is how the sketch knows what to slide and what to fade.
   //
   // Syllables of the target replace syllables of the source from the
   // outside in: first syllable, then last, then second, then second to
@@ -217,43 +255,122 @@ const WordMorpher = (() => {
   //   Ha|le|na   first syllable replaced by the first of Hammer
   //   Ha|le|mer  last syllable replaced by the last of Hammer
   //   Ha|mmer    left over middle syllable dropped
+  //
+  // If either word has only one syllable, that first swap would bring in
+  // (or take away) a whole word in one jump. So in that case the first
+  // syllable is swapped a piece at a time: start, then end, then vowel.
+  //
+  //   sprung -> worst              misplace -> growth
+  //   spr|u|ng  the source         m|i|s|place    the source
+  //   w|u|ng    start replaced     gr|i|s|place   start replaced
+  //   w|u|st    end replaced       gr|i|th|place  end replaced
+  //   w|or|st   vowel replaced     gr|ow|th|place vowel replaced
+  //                                gr|ow|th       left over syllable dropped
   function morphSteps(source, target, rita) {
-    const S = syllabify(source, rita);
-    const T = syllabify(target, rita);
+    const S = analyse(source, rita);
+    const T = analyse(target, rita);
+    if (S.length === 0 || T.length === 0) return [];
+
+    const pieceByPiece = S.length === 1 || T.length === 1;
 
     let front = 0; // how many target syllables are in place at the front
     let back = 0; // ...and at the back
     let lo = 0; // the source syllables still left are S[lo] to S[hi - 1]
     let hi = S.length;
 
-    function snapshot() {
-      const parts = [];
+    // `swapped` is only used part way through a piece by piece swap of
+    // the first syllable: it's how many pieces have been swapped so far.
+    function snapshot(swapped = 0) {
+      // First, the syllables in the word.
+      const syllables = [];
+      if (swapped > 0) {
+        syllables.push({ from: "both", index: 0 });
+      }
       for (let i = 0; i < front; i++) {
-        parts.push({ text: T[i], from: "target", index: i });
+        syllables.push({ from: "target", index: i, text: T[i].text });
       }
       for (let i = lo; i < hi; i++) {
-        parts.push({ text: S[i], from: "source", index: i });
+        syllables.push({ from: "source", index: i, text: S[i].text });
       }
       for (let i = T.length - back; i < T.length; i++) {
-        parts.push({ text: T[i], from: "target", index: i });
+        syllables.push({ from: "target", index: i, text: T[i].text });
       }
+
       // Undouble any syllable that's been separated from the syllable
       // it normally follows.
-      for (let i = 0; i < parts.length; i++) {
-        const part = parts[i];
-        const previous = parts[i - 1];
+      for (let i = 0; i < syllables.length; i++) {
+        const syllable = syllables[i];
+        const previous = syllables[i - 1];
         const stillAttached =
-          part.index === 0 ||
+          syllable.index === 0 ||
           (previous &&
-            previous.from === part.from &&
-            previous.index === part.index - 1);
-        if (!stillAttached) part.text = undouble(part.text);
+            previous.from === syllable.from &&
+            previous.index === syllable.index - 1);
+        if (!stillAttached) syllable.text = undouble(syllable.text);
       }
-      return { word: parts.map((part) => part.text).join(""), parts };
+
+      // Then turn the syllables into parts. Most syllables are one part,
+      // but a first syllable being swapped piece by piece is three.
+      const parts = [];
+      function addPieces(index, from) {
+        for (let n = 0; n < 3; n++) {
+          const word = from[n] === "source" ? S : T;
+          parts.push({
+            text: word[index].pieces[n],
+            from: from[n],
+            id: from[n] + index + "." + n,
+          });
+        }
+      }
+      for (const syllable of syllables) {
+        if (syllable.from === "both") {
+          // Part way through: pieces are swapped start, then end.
+          addPieces(0, [
+            swapped >= 1 ? "target" : "source",
+            "source",
+            swapped >= 2 ? "target" : "source",
+          ]);
+        } else if (pieceByPiece && syllable.index === 0) {
+          addPieces(0, [syllable.from, syllable.from, syllable.from]);
+        } else {
+          parts.push({
+            text: syllable.text,
+            from: syllable.from,
+            id: syllable.from + syllable.index,
+          });
+        }
+      }
+
+      // Empty pieces (like the missing start of "at") aren't drawn.
+      const visible = parts.filter((part) => part.text !== "");
+      return {
+        word: visible.map((part) => part.text).join(""),
+        parts: visible,
+      };
     }
 
-    const steps = [snapshot()];
+    // Add a step, unless it spells the same word as the step before
+    // (in which case it takes that step's place).
+    const steps = [];
+    function addStep(step) {
+      const previous = steps[steps.length - 1];
+      if (previous && previous.word === step.word) steps.pop();
+      steps.push(step);
+    }
+
+    addStep(snapshot());
     let fromFront = true;
+
+    if (pieceByPiece) {
+      // Swap the first syllable in three smaller steps.
+      lo = 1;
+      addStep(snapshot(1)); // start swapped
+      addStep(snapshot(2)); // start and end swapped
+      front = 1;
+      addStep(snapshot()); // vowel swapped too: the whole syllable is in
+      fromFront = false;
+    }
+
     while (front + back < T.length || lo < hi) {
       if (fromFront) {
         if (front + back < T.length) front++;
@@ -263,14 +380,12 @@ const WordMorpher = (() => {
         if (lo < hi) hi--;
       }
       fromFront = !fromFront;
-
-      const step = snapshot();
-      if (step.word !== steps[steps.length - 1].word) steps.push(step);
+      addStep(snapshot());
     }
     return steps;
   }
 
-  return { syllabify, morphSteps, alignPhonesToLetters, clean };
+  return { analyse, syllabify, morphSteps, alignPhonesToLetters, clean };
 })();
 
 // Allow `require("./morpher.js")` in Node, for testing.

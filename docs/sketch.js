@@ -1,7 +1,8 @@
 // WordMorpher sketch: animates the steps worked out by morpher.js.
 //
-// Type two words, press Morph (or Enter). Syllables that came from the
-// first word are drawn in ink, syllables from the second word in red.
+// Type two words and press Morph (or Enter), or press Random to have RiTa
+// pick two words. Syllables that came from the first word are drawn in
+// ink, syllables from the second word in red.
 
 const HOLD_TIME = 1400; // how long each word rests on screen (ms)
 const MOVE_TIME = 900; // how long each change takes (ms)
@@ -31,6 +32,7 @@ function setup() {
   targetInput = createInput("Hammer").parent("controls");
   createButton("Morph").parent("controls").mousePressed(startMorph);
   createButton("Swap").parent("controls").mousePressed(swapWords);
+  createButton("Random").parent("controls").mousePressed(randomWords);
 
   sourceInput.attribute("aria-label", "Word to morph from");
   targetInput.attribute("aria-label", "Word to morph to");
@@ -60,6 +62,16 @@ function swapWords() {
   const source = sourceInput.value();
   sourceInput.value(targetInput.value());
   targetInput.value(source);
+  startMorph();
+}
+
+// Pick two random words from RiTa's dictionary and morph between them.
+function randomWords() {
+  const source = RiTa.randomWord();
+  let target = RiTa.randomWord();
+  while (target === source) target = RiTa.randomWord();
+  sourceInput.value(source);
+  targetInput.value(target);
   startMorph();
 }
 
@@ -141,7 +153,7 @@ function layOut(step) {
   const placed = [];
   for (const part of step.parts) {
     placed.push({
-      key: part.from + part.index + part.text,
+      key: part.id + ":" + part.text,
       text: part.text,
       from: part.from,
       x: x,
